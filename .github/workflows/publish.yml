@@ -1,0 +1,67 @@
+name: Publish Encrypted Coastal Escape
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: encrypted-pages
+  cancel-in-progress: false
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Check the public unlock scripts
+        run: |
+          node --check gate.js
+          node --check sw.js
+      - name: Validate and stage only the encrypted app
+        run: |
+          python - <<'PY'
+          import json,base64,shutil
+          from pathlib import Path
+          files=['index.html','gate.js','payload.json','sw.js','manifest.webmanifest','icon.svg','icon-192.png','icon-512.png','icon-maskable-512.png','STATICRYPT-LICENSE.txt','THIRD_PARTY.txt','.nojekyll']
+          package=json.loads(Path('payload.json').read_text())
+          assert package['format']=='staticrypt-3.5.4' and len(package['salt'])==32
+          assert len(base64.b64decode(package['ciphertext']))>1000
+          assert 'Our Coastal Escape' in Path('index.html').read_text()
+          assert 'payload.json' in Path('sw.js').read_text()
+          Path('dist').mkdir(exist_ok=True)
+          for name in files:shutil.copyfile(name,Path('dist')/name)
+          print('Only encrypted content and the generic unlock/install shell are staged.')
+          PY
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+      - name: Publish the encrypted guide
+        id: deployment
+        uses: actions/deploy-pages@v4
+      - name: Verify live HTTPS lock and encrypted package
+        env:
+          SITE_URL: ${{ steps.deployment.outputs.page_url }}
+        run: |
+          curl -fLsS --retry 8 --retry-all-errors --retry-delay 5 --max-time 20 "${SITE_URL}" -o live.html
+          curl -fLsS --retry 8 --retry-all-errors --retry-delay 5 --max-time 20 "${SITE_URL}payload.json" -o live-payload.json
+          curl -fLsS --retry 8 --retry-all-errors --retry-delay 5 --max-time 20 "${SITE_URL}manifest.webmanifest" -o live-manifest.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          assert 'id="passphrase"' in Path('live.html').read_text()
+          assert json.loads(Path('live-payload.json').read_text())==json.loads(Path('payload.json').read_text())
+          assert json.loads(Path('live-manifest.json').read_text())['display']=='standalone'
+          print('Live passphrase gate, exact encrypted package, and install manifest verified over HTTPS.')
+          PY
